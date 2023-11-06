@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width">
+	<title>gl</title>
+	<link href="style.css" rel="stylesheet" type="text/css"/>
+</head>
+
+<style>
+#largelog {
+	position: absolute;
+	left: 800px;
+}
+</style>
+
+<body>
+	<div id=largelog></div>
+	<canvas width=600 height=600 id=glcanvas></canvas>
+	<div id=log></div>
+	<script id=vert type=plain/text>
+		precision mediump float;
+
+		uniform mat4 model, view, projection;
+		
+		in vec3 position;
+		in vec3 color;
+		out vec3 fragColor;
+		out float fragDepth;
+
+		
+		void main() {
+			gl_Position = vec4(position, 1.0)
+				* model * view * projection;
+			fragColor = color;
+			fragDepth = gl_Position.z;
+		}
+	</script>
+	<script id=frag type=plain/text>
+		precision mediump float;
+
+		in vec3 fragColor;
+		in float fragDepth;
+		out vec4 color;
+		
+		void main() {
+			color = vec4(fragColor, 1.0f);
+			//color = vec4(fragDepth, fragDepth, fragDepth, 1.0f);
+		}
+	</script>
+	<script>
+		window.addEventListener('error', (e) => {
+			alert(`Error at ${e.lineno}:${e.colno}: ${e.message}`)
+		})
+		window.addEventListener('unhandledrejection', (e) => {
+			alert('Unhandled Rejection: ' + e.reason)
+		})
+	</script>
+	<script>
+
+let gl
+const $ = (sel) => document.querySelector(sel)
+
+
+const vertices = new Float32Array([
+	-1.0, -1.0, -1.0, 0.0, 0.5, 1.0,
+	-1.0, -1.0, 1.0,  0.0, 0.5, 1.0,
+	1.0, -1.0, 1.0,   0.0, 0.5, 1.0,
+	1.0, -1.0, 1.0,   0.0, 0.5, 1.0,
+	1.0, -1.0, -1.0,  0.0, 0.5, 1.0,
+	-1.0, -1.0, -1.0, 0.0, 0.5, 1.0,
+
+	-1.0, -1.0, 1.0, 0.5, 1.0, 0.0,
+	-1.0, -1.0, 3.0, 0.5, 1.0, 0.0,
+	1.0, -1.0,  3.0, 0.5, 1.0, 0.0,
+	1.0, -1.0,  3.0, 0.5, 1.0, 0.0,
+	1.0, -1.0,  1.0, 0.5, 1.0, 0.0,
+	-1.0, -1.0, 1.0, 0.5, 1.0, 0.0,
+])
+const version = '#version 300 es\n'
+
+const size = {
+	float: 4,
+}
+
+const gfxMath = {}
+gfxMath.identity = (len) => {
+	const ret = []
+	for (let i = 0; i < len; i++) {
+		for (let j = 0; j < len; j++) {
+			ret[i*len + j] = (j == i ? 1 : 0)
+		}
+	}
+	return ret
+}
+gfxMath.ident4 = gfxMath.identity(4)
+gfxMath.translate = ([x, y, z]) => [
+	1, 0, 0, x,
+	0, 1, 0, y,
+	0, 0, 1, z,
+	0, 0, 0, 1,
+]
+gfxMath.roll = (angle) => {
+	const c = Math.cos(angle), s = Math.sin(angle)
+	return [
+		c, -s, 0, 0,
+		s,  c, 0, 0,
+		0,  0, 1, 0,
+		0,  0, 0, 1,
+	]
+}
+gfxMath.pitch = (angle) => {
+	const c = Math.cos(angle), s = Math.sin(angle)
+	return [
+		1,  0, 0,  0,
+		0,  c, -s, 0,
+		0,  s, c,  0,
+		0,  0, 0,  1,
+	]
+}
+gfxMath.yaw = (angle) => {
+	const c = Math.cos(angle), s = Math.sin(angle)
+	return [
+		c,  0, -s, 0,
+		0,  1,  0, 0,
+		s,  0,  c, 0,
+		0,  0,  0, 1,
+	]
+}
+gfxMath.perspective = (near, far) => [
+	1, 0, 0, 0,
+	0, 1, 0, 0,
+	0, 0, far/(far-near), -(far*near)/(far-near),
+	0, 0, 1, 0,
+]
+
+gfxMath.matrixMulFn = (dim) => {
+	const c = (x, y) => y*dim + x
+	const mul = (ax, ay, bx, by) => `a[${c(ax, ay)}]*b[${c(bx, by)}]`
+	const dot = (bCol, aRow) => {
+		let ret = ''
+		for (let i = 0; i < dim; i++) {
+			ret += mul(i, aRow, bCol, i)
+			if (i != dim - 1) ret += ' + '
+		}
+		return ret
+	}
+	let ret = '['
+	for (let y = 0; y < dim; y++) {
+		for (let x = 0; x < dim; x++) {
+			ret += dot(x, y) + ', '
+		}
+	}
+	ret += ']'
+	return Function('a', 'b', `return ${ret}`)
+}
+gfxMath.matMul4x4 = gfxMath.matrixMulFn(4)
+
+gfxMath.vecMatMul4 = (v, m) => [
+	v[0]*m[0]  + v[1]*m[1]  + v[2]*m[2]  + v[3]*m[3],
+	v[0]*m[4]  + v[1]*m[5]  + v[2]*m[6]  + v[3]*m[7],
+	v[0]*m[8]  + v[1]*m[9]  + v[2]*m[10] + v[3]*m[11],
+	v[0]*m[12] + v[1]*m[13] + v[2]*m[14] + v[3]*m[15],
+]
+gfxMath.vecMatMul3 = (v, m) => [
+	v[0]*m[0] + v[1]*m[1] + v[2]*m[2],
+	v[0]*m[3] + v[1]*m[4] + v[2]*m[5],
+	v[0]*m[6] + v[1]*m[7] + v[2]*m[8],
+]
+
+gfxMath.minus2 = (a, b) => [a[0]-b[0], a[1]-b[1]]
+gfxMath.minus3 = (a, b) => [a[0]-b[0], a[1]-b[1], a[2]-b[2]]
+gfxMath.minus4 = (a, b) => [a[0]-b[0], a[1]-b[1], a[2]-b[2], a[3]-b[3]]
+
+gfxMath.dot2 = (a, b) => a[0]*b[0] + a[1]*b[1]
+gfxMath.dot3 = (a, b) => a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+gfxMath.dot4 = (a, b) => a[0]*b[0] + a[1]*b[1] + a[2]*b[2] + a[3]*b[3]
+
+gfxMath.mag2 = (a) => Math.sqrt(a[0]*a[0] + a[1]*a[1])
+gfxMath.mag3 = (a) => Math.sqrt(a[0]*a[0] + a[1]*a[1] + a[2]*a[2])
+gfxMath.mag4 = (a) => Math.sqrt(a[0]*a[0] + a[1]*a[1] + a[2]*a[2] + a[3]*a[3])
+
+gfxMath.norm2 = (a) => {
+	const mag = gfxMath.mag2(a)
+	return [a[0]/mag, a[1]/mag]
+}
+gfxMath.norm3 = (a) => {
+	const mag = gfxMath.mag3(a)
+	return [a[0]/mag, a[1]/mag, a[2]/mag]
+}
+gfxMath.norm4 = (a) => {
+	const mag = gfxMath.mag3(a)
+	return [a[0]/mag, a[1]/mag, a[2]/mag, a[3]/mag]
+}
+
+gfxMath.cross = (a, b) => [
+	a[1]*b[2] - a[2]*b[1],
+	a[2]*b[0] - a[0]*b[2],
+	a[0]*b[1] - a[1]*b[0],
+]
+
+gfxMath.lookAt = (pos, target) => {
+	const camDir = gfxMath.norm3(gfxMath.minus3(pos, target))
+	const up = [0.0, 1.0, 0.0]
+	const camRight = gfxMath.norm3(gfxMath.cross(up, camDir))
+	const camUp = gfxMath.cross(camDir, camRight)
+
+	const A = [
+		camRight[0], camRight[1], camRight[2], 0,
+		camUp[0],    camUp[1],    camUp[2],    0,
+		camDir[0],   camDir[1],   camDir[2],   0,
+		0,           0,           0,           1,
+	]
+	const B = [
+		1, 0, 0, -(pos[0]),
+		0, 1, 0, -(pos[1]),
+		0, 0, 1, -(pos[2]),
+		0, 0, 0, 1,
+	]
+	return gfxMath.matMul4x4(A, B)
+}
+
+gfxMath.addByFac3 = (a, b, fac) => {
+	a[0] += b[0]*fac
+	a[1] += b[1]*fac
+	a[2] += b[2]*fac
+}
+
+gfxMath.forwardVec = (yaw) => [Math.sin(yaw), 0.0, Math.cos(yaw)]
+gfxMath.rightVec = (yaw)   => [Math.cos(yaw), 0.0, -Math.sin(yaw)]
+
+gfxMath.HALF_PI = Math.PI / 2
+gfxMath.QUARTER_PI = Math.PI / 4
+
+function singleShader(code, type) {
+	const shader = gl.createShader(type)
+	gl.shaderSource(shader, version+code);
+	gl.compileShader(shader);
+	if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+		const strtype =
+			(type == gl.VERTEX_SHADER) ? 'VERTEX' : 'FRAGMENT'
+		throw `${strtype} ${gl.getShaderInfoLog(shader)}`
+	}
+	return shader
+}
+
+function shaderProg() {
+	const vert = singleShader(
+		$('#vert').innerHTML, gl.VERTEX_SHADER)
+	const frag = singleShader(
+		$('#frag').innerHTML, gl.FRAGMENT_SHADER)
+	const prog = gl.createProgram()
+	gl.attachShader(prog, vert)
+	gl.attachShader(prog, frag)
+	gl.linkProgram(prog)
+	if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+		throw gl.getProgramInfoLog(prog)
+	}
+	gl.useProgram(prog)
+	return prog
+}
+
+function vertexBuffer() {
+	const vbo = gl.createBuffer()
+	gl.bindBuffer(gl.ARRAY_BUFFER, vbo)
+	gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW)
+}
+
+function vertAttr(
+	prog, name, amount, type, stride, offset
+) {
+	const loc = gl.getAttribLocation(prog, name)
+	if (loc == -1) throw `${name} doesnt exist!`
+	gl.vertexAttribPointer(
+		loc, amount, type, false, stride, offset)
+	gl.enableVertexAttribArray(loc)
+}
+
+function uniformMat4(prog, name, mat) {
+	const loc = gl.getUniformLocation(prog, name)
+	gl.uniformMatrix4fv(loc, false, mat)
+}
+
+const grounded = (z) => (z == 0.0)
+
+const arr = [0.0, 0.0, 0.0]
+let yawAngle = 0.0, pitchAngle = -gfxMath.QUARTER_PI
+
+let xMove = 0.0, zMove = 0.0
+
+window.addEventListener('keydown', (e) => {
+	if (e.repeat) return
+	//$('#largelog').innerHTML += `keydown ${e.key}<br>`
+
+
+	if (e.key == 'w') zMove = -1.0
+	if (e.key == 's') zMove = 1.0
+	if (e.key == 'd') xMove = -1.0
+	if (e.key == 'a') xMove = 1.0
+})
+window.addEventListener('keyup', (e) => {
+	//$('#largelog').innerHTML += `keyup ${e.key}<br>`
+	if (e.key == 'w') zMove = 0.0
+	if (e.key == 's') zMove = 0.0
+	if (e.key == 'd') xMove = 0.0
+	if (e.key == 'a') xMove = 0.0
+})
+
+const three = (a, b, c) => gfxMath.matMul4x4(gfxMath.matMul4x4(a, b), c)
+
+function main() {
+	const canvas = $('#glcanvas')
+	const log = $('#log')
+	canvas.addEventListener('click', async () => {
+		if (!document.pointerLockElement) {
+			await canvas.requestPointerLock({
+				unadjustedMovement: false,
+			})
+		}
+	})
+	const onmousemove = (e) => {
+		//log.innerHTML = `(${e.movementX}, ${e.movementY})`
+		yawAngle   -= e.movementX / 100;
+		pitchAngle += e.movementY / 100;
+		if (pitchAngle > gfxMath.HALF_PI)
+			pitchAngle = gfxMath.HALF_PI
+		if (pitchAngle < -gfxMath.HALF_PI)
+			pitchAngle = -gfxMath.HALF_PI
+	}
+	document.addEventListener('pointerlockchange', (e) => {
+		if (document.pointerLockElement === canvas) {
+			document.addEventListener('mousemove', onmousemove, false)
+		} else {
+			document.removeEventListener('mousemove', onmousemove, false)
+		}
+	})
+
+
+	gl = canvas.getContext('webgl2')
+	if (gl === null) {
+		throw 'uh oh'
+	}
+
+	const prog = shaderProg()
+	const vbo = vertexBuffer()
+
+	gl.enable(gl.DEPTH_TEST)
+
+	const speed = 0.04
+	let last = Date.now()
+	let now = last
+	let dt = 0
+	const loop = () => {
+		now = Date.now() 
+		dt = now - last
+		last = now
+
+		log.innerHTML = `${xMove}, ${zMove}`
+		if (zMove != 0.0) {
+			gfxMath.addByFac3(arr, gfxMath.forwardVec(yawAngle), speed * zMove);
+		}
+		if (xMove != 0.0) {
+			gfxMath.addByFac3(arr, gfxMath.rightVec(yawAngle),   speed * xMove);
+		}
+
+		gl.clearColor(0.7, 0.8, 1.0, 1.0)
+		gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
+
+		uniformMat4(prog, 'model', gfxMath.ident4)
+
+		//let view = gfxMath.matMul4x4(gfxMath.pitch(pitchAngle), gfxMath.yaw(yawAngle))
+		//uniformMat4(prog, 'view', gfxMath.matMul4x4(view, gfxMath.translate(arr)))
+		uniformMat4(prog, 'view', three(gfxMath.pitch(pitchAngle), gfxMath.yaw(yawAngle), gfxMath.translate(arr)))
+
+		//uniformMat4(prog, 'view', gfxMath.lookAt(arr, [0.0, 0.0, 0.0]))
+		uniformMat4(prog, 'projection', gfxMath.perspective(0.1, 5.0))
+
+		vertAttr(prog, 'position', 3, gl.FLOAT, 6*size.float, 0)
+		vertAttr(prog, 'color', 3, gl.FLOAT, 6*size.float, 3*size.float)
+		gl.drawArrays(gl.TRIANGLES, 0, 12)
+
+
+		window.requestAnimationFrame(loop)
+	}
+	window.requestAnimationFrame(loop)
+}
+main()
+	</script>
+</html>
